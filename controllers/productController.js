@@ -1,6 +1,8 @@
-const multer = require("multer");
 const Product = require("../models/product");
 const jwt = require("jsonwebtoken");
+const upload = require("../unitils/uploadMiddleware");
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicIdFromUrl } = require("../unitils/cloudinaryConfig");
+const fs = require("fs");
 
 const isAdmin = (token) => {
   try {
@@ -10,17 +12,6 @@ const isAdmin = (token) => {
     return false;
   }
 };
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "./uploads");
-  },
-  filename: function (req, file, cb) {
-    cb(null, new Date().toISOString().replace(/:/g, "-") + file.originalname);
-  },
-});
-
-const upload = multer({ storage: storage }).single("productImage");
 
 const getProducts = async (req, res) => {
   try {
@@ -50,22 +41,38 @@ const addProduct = async (req, res) => {
     return res.status(403).send("You do not have permission for this operation");
   }
 
-  upload(req, res, async (err) => {
+  upload.single("productImage")(req, res, async (err) => {
     if (err) return res.status(400).send({ message: err.message });
 
     const { name, details, price } = req.body;
 
     try {
+      let productImageUrl = null;
+
+      if (req.file) {
+        const uploadResult = await uploadToCloudinary(req.file.path, "products");
+        
+        if (uploadResult.success) {
+          productImageUrl = uploadResult.url;
+          fs.unlinkSync(req.file.path);
+        } else {
+          return res.status(500).send("Error uploading image to Cloudinary");
+        }
+      }
+
       const newProduct = new Product({
         name,
         details,
         price,
-        productImage: req.file ? req.file.path : null,
+        productImage: productImageUrl,
       });
 
       await newProduct.save();
       res.send(newProduct);
     } catch (error) {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
       res.status(500).send("Error: addProduct " + error.message);
     }
   });
@@ -79,7 +86,7 @@ const updateProduct = async (req, res) => {
     return res.status(403).send("You do not have permission for this operation");
   }
 
-  upload(req, res, async (err) => {
+  upload.single("productImage")(req, res, async (err) => {
     if (err) return res.status(400).send({ message: err.message });
 
     try {
@@ -92,12 +99,32 @@ const updateProduct = async (req, res) => {
       product.price = price || product.price;
 
       if (req.file) {
-        product.productImage = req.file.path;
+        if (product.productImage) {
+          const publicId = extractPublicIdFromUrl(product.productImage);
+          if (publicId) {
+            await deleteFromCloudinary(publicId);
+          }
+        }
+
+        const uploadResult = await uploadToCloudinary(req.file.path, "products");
+        
+        if (uploadResult.success) {
+          product.productImage = uploadResult.url;
+          fs.unlinkSync(req.file.path);
+        } else {
+          if (fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+          }
+          return res.status(500).send("Error uploading image to Cloudinary");
+        }
       }
 
       await product.save();
       res.send(product);
     } catch (error) {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
       res.status(500).send("Error: updateProduct " + error.message);
     }
   });
@@ -110,7 +137,17 @@ const deleteProduct = async (req, res) => {
   if (!userIsAdmin) {
     return res.status(403).send("You do not have permission for this operation");
   }
+  
   try {
+    const product = await Product.findById(req.params.id);
+    
+    if (product && product.productImage) {
+      const publicId = extractPublicIdFromUrl(product.productImage);
+      if (publicId) {
+        await deleteFromCloudinary(publicId);
+      }
+    }
+    
     await Product.findByIdAndDelete(req.params.id);
     res.send({ message: "Product deleted successfully" });
   } catch (error) {

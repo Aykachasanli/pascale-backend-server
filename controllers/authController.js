@@ -3,23 +3,10 @@ const jwt = require("jsonwebtoken");
 const otpGenerator = require("otp-generator");
 const nodemailer = require("nodemailer");
 const User = require("../models/user");
-const multer = require("multer");
-const path = require("path");
+const upload = require("../unitils/uploadMiddleware");
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicIdFromUrl } = require("../unitils/cloudinaryConfig");
+const fs = require("fs");
 require("dotenv").config();
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
-  },
-  filename: (req, file, cb) => {
-    cb(
-      null,
-      file.fieldname + "-" + Date.now() + path.extname(file.originalname)
-    );
-  },
-});
-
-const upload = multer({ storage: storage }).single("profileImage");
 
 const registerUser = async (req, res) => {
   const { name, surname, email, password } = req.body;
@@ -134,16 +121,42 @@ const changeProfileImage = async (req, res) => {
     const user = await User.findById(decoded.userId);
     if (!user) return res.status(404).send("User not found.");
 
-    upload(req, res, async (err) => {
+    upload.single("profileImage")(req, res, async (err) => {
       if (err) return res.status(400).send("Şəkil yüklənmədi: " + err.message);
 
-      user.profileImage = req.file.path;
-      await user.save();
+      if (!req.file) return res.status(400).send("No file uploaded");
 
-      res.send({
-        message: "Profile image changed successfully",
-        profileImage: user.profileImage,
-      });
+      try {
+        if (user.profileImage) {
+          const publicId = extractPublicIdFromUrl(user.profileImage);
+          if (publicId) {
+            await deleteFromCloudinary(publicId);
+          }
+        }
+
+        const uploadResult = await uploadToCloudinary(req.file.path, "profiles");
+        
+        if (uploadResult.success) {
+          user.profileImage = uploadResult.url;
+          fs.unlinkSync(req.file.path);
+          await user.save();
+
+          res.send({
+            message: "Profile image changed successfully",
+            profileImage: user.profileImage,
+          });
+        } else {
+          if (fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+          }
+          return res.status(500).send("Error uploading image to Cloudinary");
+        }
+      } catch (uploadError) {
+        if (req.file && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        res.status(500).send("Error: " + uploadError.message);
+      }
     });
   } catch (error) {
     res.status(500).send("Error changeProfileImage: " + error.message);
